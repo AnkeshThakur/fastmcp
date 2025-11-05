@@ -1136,16 +1136,31 @@ class OAuthProxy(OAuthProvider):
             idp_tokens.get("expires_in", DEFAULT_ACCESS_TOKEN_EXPIRY_SECONDS)
         )
 
+        # Log upstream token response fields for debugging
+        logger.debug("Upstream token response fields: %s", list(idp_tokens.keys()))
+
         # Calculate refresh token expiry if provided by upstream
-        # Some providers include refresh_expires_in, some don't
+        # Some providers include refresh_expires_in, some use expires_at
         refresh_expires_in = None
         refresh_token_expires_at = None
         if idp_tokens.get("refresh_token"):
+            logger.debug("Upstream token values: %s", idp_tokens)
             if "refresh_expires_in" in idp_tokens:
                 refresh_expires_in = int(idp_tokens["refresh_expires_in"])
                 refresh_token_expires_at = time.time() + refresh_expires_in
                 logger.debug(
-                    "Upstream refresh token expires in %d seconds", refresh_expires_in
+                    "Upstream refresh token: using refresh_expires_in=%d seconds, calculated expires_at=%f",
+                    refresh_expires_in,
+                    refresh_token_expires_at,
+                )
+            elif "expires_at" in idp_tokens:
+                # Provider sends absolute expiration timestamp
+                refresh_token_expires_at = float(idp_tokens["expires_at"])
+                refresh_expires_in = int(refresh_token_expires_at - time.time())
+                logger.debug(
+                    "Upstream refresh token: using expires_at=%f (calculated refresh_expires_in=%d seconds)",
+                    refresh_token_expires_at,
+                    refresh_expires_in,
                 )
             else:
                 # Default to 30 days if upstream doesn't specify
@@ -1153,7 +1168,9 @@ class OAuthProxy(OAuthProvider):
                 refresh_expires_in = 60 * 60 * 24 * 30  # 30 days
                 refresh_token_expires_at = time.time() + refresh_expires_in
                 logger.debug(
-                    "Upstream refresh token expiry unknown, using 30-day default"
+                    "Upstream refresh token: no expiry provided, using 30-day default (refresh_expires_in=%d, expires_at=%f)",
+                    refresh_expires_in,
+                    refresh_token_expires_at,
                 )
 
         # Encrypt and store upstream tokens
@@ -1351,7 +1368,21 @@ class OAuthProxy(OAuthProvider):
                     time.time() + new_refresh_expires_in
                 )
                 logger.debug(
-                    "Upstream refresh token expires in %d seconds",
+                    "Token refresh: using refresh_expires_in=%d seconds, calculated expires_at=%f",
+                    new_refresh_expires_in,
+                    upstream_token_set.refresh_token_expires_at,
+                )
+            elif "expires_at" in token_response:
+                # Provider sends absolute expiration timestamp
+                upstream_token_set.refresh_token_expires_at = float(
+                    token_response["expires_at"]
+                )
+                new_refresh_expires_in = int(
+                    upstream_token_set.refresh_token_expires_at - time.time()
+                )
+                logger.debug(
+                    "Token refresh: using expires_at=%f (calculated refresh_expires_in=%d seconds)",
+                    upstream_token_set.refresh_token_expires_at,
                     new_refresh_expires_in,
                 )
             elif upstream_token_set.refresh_token_expires_at:
@@ -1359,11 +1390,21 @@ class OAuthProxy(OAuthProvider):
                 new_refresh_expires_in = int(
                     upstream_token_set.refresh_token_expires_at - time.time()
                 )
+                logger.debug(
+                    "Token refresh: keeping existing expiry (expires_at=%f, refresh_expires_in=%d seconds)",
+                    upstream_token_set.refresh_token_expires_at,
+                    new_refresh_expires_in,
+                )
             else:
                 # Default to 30 days if unknown
                 new_refresh_expires_in = 60 * 60 * 24 * 30
                 upstream_token_set.refresh_token_expires_at = (
                     time.time() + new_refresh_expires_in
+                )
+                logger.debug(
+                    "Token refresh: no expiry provided, using 30-day default (refresh_expires_in=%d, expires_at=%f)",
+                    new_refresh_expires_in,
+                    upstream_token_set.refresh_token_expires_at,
                 )
 
         upstream_token_set.raw_token_data = token_response
