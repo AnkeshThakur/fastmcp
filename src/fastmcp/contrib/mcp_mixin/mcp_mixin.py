@@ -4,11 +4,15 @@ import warnings
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
+import mcp.types
 from mcp.types import Annotations, ToolAnnotations
 
 import fastmcp
 from fastmcp.prompts.prompt import Prompt
 from fastmcp.resources.resource import Resource
+from fastmcp.resources.template import ResourceTemplate
+from fastmcp.server.auth.authorization import AuthCheck
+from fastmcp.server.tasks import TaskConfig
 from fastmcp.tools.tool import Tool
 from fastmcp.utilities.types import get_fn_name
 
@@ -25,16 +29,45 @@ _DEFAULT_SEPARATOR_PROMPT = "_"
 
 
 def mcp_tool(
+    name_or_fn: str | Callable[..., Any] | None = None,
+    *,
     name: str | None = None,
+    version: str | int | None = None,
+    title: str | None = None,
     description: str | None = None,
+    icons: list[mcp.types.Icon] | None = None,
     tags: set[str] | None = None,
+    output_schema: dict[str, Any] | None = None,
     annotations: ToolAnnotations | dict[str, Any] | None = None,
     exclude_args: list[str] | None = None,
     serializer: Callable[[Any], str] | None = None,  # Deprecated
     meta: dict[str, Any] | None = None,
-    enabled: bool | None = None,
-) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
-    """Decorator to mark a method as an MCP tool for later registration."""
+    enabled: bool = True,
+    task: bool | TaskConfig | None = None,
+    timeout: float | None = None,
+    auth: AuthCheck | list[AuthCheck] | None = None,
+) -> Callable[[Callable[..., Any]], Callable[..., Any]] | Callable[..., Any]:
+    """Decorator to mark a method as an MCP tool for later registration.
+
+    Args:
+        name: Custom name for the tool (defaults to function name).
+        version: Version of the tool.
+        title: Title for the tool.
+        description: Description of what the tool does.
+        icons: List of icons for the tool.
+        tags: Set of tags to categorize the tool.
+        output_schema: JSON schema for the tool's output.
+        annotations: Tool annotations for additional metadata.
+        exclude_args: List of function arguments to exclude from the tool schema.
+        serializer: (Deprecated) Custom serializer for tool results.
+        meta: Additional metadata dictionary.
+        enabled: Whether the tool is enabled (default True).
+        task: Task configuration for background execution.
+        timeout: Timeout for tool execution.
+        auth: Authorization checks for this tool.
+    """
+    import inspect
+
     if serializer is not None and fastmcp.settings.deprecation_warnings:
         warnings.warn(
             "The `serializer` parameter is deprecated. "
@@ -44,49 +77,102 @@ def mcp_tool(
             stacklevel=2,
         )
 
-    def decorator(func: Callable[..., Any]) -> Callable[..., Any]:
+    def decorator(
+        func: Callable[..., Any], tool_name: str | None
+    ) -> Callable[..., Any]:
         call_args = {
-            "name": name or get_fn_name(func),
+            "name": tool_name or get_fn_name(func),
+            "version": version,
+            "title": title,
             "description": description,
+            "icons": icons,
             "tags": tags,
+            "output_schema": output_schema,
             "annotations": annotations,
             "exclude_args": exclude_args,
             "serializer": serializer,
             "meta": meta,
             "enabled": enabled,
+            "task": task,
+            "timeout": timeout,
+            "auth": auth,
         }
         call_args = {k: v for k, v in call_args.items() if v is not None}
         setattr(func, _MCP_REGISTRATION_TOOL_ATTR, call_args)
         return func
 
-    return decorator
+    # Handle direct decoration (@mcp_tool)
+    if inspect.isroutine(name_or_fn):
+        return decorator(name_or_fn, name)
+
+    # Handle string name (@mcp_tool("custom_name"))
+    elif isinstance(name_or_fn, str):
+        if name is not None:
+            raise TypeError("Cannot specify name both as first argument and keyword")
+        tool_name = name_or_fn
+
+    # Handle parameterized decoration (@mcp_tool() or @mcp_tool(auth=...))
+    elif name_or_fn is None:
+        tool_name = name
+    else:
+        raise TypeError(f"Invalid first argument: {type(name_or_fn)}")
+
+    # Return decorator factory
+    def wrapper(func: Callable[..., Any]) -> Callable[..., Any]:
+        return decorator(func, tool_name)
+
+    return wrapper
 
 
 def mcp_resource(
     uri: str,
     *,
     name: str | None = None,
+    version: str | int | None = None,
     title: str | None = None,
     description: str | None = None,
+    icons: list[mcp.types.Icon] | None = None,
     mime_type: str | None = None,
     tags: set[str] | None = None,
     annotations: Annotations | None = None,
     meta: dict[str, Any] | None = None,
-    enabled: bool | None = None,
+    enabled: bool = True,
+    task: bool | TaskConfig | None = None,
+    auth: AuthCheck | list[AuthCheck] | None = None,
 ) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
-    """Decorator to mark a method as an MCP resource for later registration."""
+    """Decorator to mark a method as an MCP resource for later registration.
+
+    Args:
+        uri: URI for the resource.
+        name: Custom name for the resource (defaults to function name).
+        version: Version of the resource.
+        title: Title for the resource.
+        description: Description of what the resource provides.
+        icons: List of icons for the resource.
+        mime_type: MIME type for the resource.
+        tags: Set of tags to categorize the resource.
+        annotations: Resource annotations for additional metadata.
+        meta: Additional metadata dictionary.
+        enabled: Whether the resource is enabled (default True).
+        task: Task configuration for background execution.
+        auth: Authorization checks for this resource.
+    """
 
     def decorator(func: Callable[..., Any]) -> Callable[..., Any]:
         call_args = {
             "uri": uri,
             "name": name or get_fn_name(func),
+            "version": version,
             "title": title,
             "description": description,
+            "icons": icons,
             "mime_type": mime_type,
             "tags": tags,
             "annotations": annotations,
             "meta": meta,
             "enabled": enabled,
+            "task": task,
+            "auth": auth,
         }
         call_args = {k: v for k, v in call_args.items() if v is not None}
 
@@ -98,31 +184,75 @@ def mcp_resource(
 
 
 def mcp_prompt(
+    name_or_fn: str | Callable[..., Any] | None = None,
+    *,
     name: str | None = None,
+    version: str | int | None = None,
     title: str | None = None,
     description: str | None = None,
+    icons: list[mcp.types.Icon] | None = None,
     tags: set[str] | None = None,
     meta: dict[str, Any] | None = None,
-    enabled: bool | None = None,
-) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
-    """Decorator to mark a method as an MCP prompt for later registration."""
+    enabled: bool = True,
+    task: bool | TaskConfig | None = None,
+    auth: AuthCheck | list[AuthCheck] | None = None,
+) -> Callable[[Callable[..., Any]], Callable[..., Any]] | Callable[..., Any]:
+    """Decorator to mark a method as an MCP prompt for later registration.
 
-    def decorator(func: Callable[..., Any]) -> Callable[..., Any]:
+    Args:
+        name: Custom name for the prompt (defaults to function name).
+        version: Version of the prompt.
+        title: Title for the prompt.
+        description: Description of what the prompt does.
+        icons: List of icons for the prompt.
+        tags: Set of tags to categorize the prompt.
+        meta: Additional metadata dictionary.
+        enabled: Whether the prompt is enabled (default True).
+        task: Task configuration for background execution.
+        auth: Authorization checks for this prompt.
+    """
+    import inspect
+
+    def decorator(
+        func: Callable[..., Any], prompt_name: str | None
+    ) -> Callable[..., Any]:
         call_args = {
-            "name": name or get_fn_name(func),
+            "name": prompt_name or get_fn_name(func),
+            "version": version,
             "title": title,
             "description": description,
+            "icons": icons,
             "tags": tags,
             "meta": meta,
             "enabled": enabled,
+            "task": task,
+            "auth": auth,
         }
-
         call_args = {k: v for k, v in call_args.items() if v is not None}
-
         setattr(func, _MCP_REGISTRATION_PROMPT_ATTR, call_args)
         return func
 
-    return decorator
+    # Handle direct decoration (@mcp_prompt)
+    if inspect.isroutine(name_or_fn):
+        return decorator(name_or_fn, name)
+
+    # Handle string name (@mcp_prompt("custom_name"))
+    elif isinstance(name_or_fn, str):
+        if name is not None:
+            raise TypeError("Cannot specify name both as first argument and keyword")
+        prompt_name = name_or_fn
+
+    # Handle parameterized decoration (@mcp_prompt() or @mcp_prompt(auth=...))
+    elif name_or_fn is None:
+        prompt_name = name
+    else:
+        raise TypeError(f"Invalid first argument: {type(name_or_fn)}")
+
+    # Return decorator factory
+    def wrapper(func: Callable[..., Any]) -> Callable[..., Any]:
+        return decorator(func, prompt_name)
+
+    return wrapper
 
 
 class MCPMixin:
@@ -173,13 +303,19 @@ class MCPMixin:
             tool = Tool.from_function(
                 fn=method,
                 name=registration_info.get("name"),
+                version=registration_info.get("version"),
+                title=registration_info.get("title"),
                 description=registration_info.get("description"),
+                icons=registration_info.get("icons"),
                 tags=registration_info.get("tags"),
+                output_schema=registration_info.get("output_schema"),
                 annotations=registration_info.get("annotations"),
                 exclude_args=registration_info.get("exclude_args"),
                 serializer=registration_info.get("serializer"),
-                output_schema=registration_info.get("output_schema"),
                 meta=registration_info.get("meta"),
+                task=registration_info.get("task"),
+                timeout=registration_info.get("timeout"),
+                auth=registration_info.get("auth"),
             )
 
             mcp_server.add_tool(tool)
@@ -211,19 +347,43 @@ class MCPMixin:
                     f"{prefix}{separator}{registration_info['uri']}"
                 )
 
-            resource = Resource.from_function(
-                fn=method,
-                uri=registration_info["uri"],
-                name=registration_info.get("name"),
-                title=registration_info.get("title"),
-                description=registration_info.get("description"),
-                mime_type=registration_info.get("mime_type"),
-                tags=registration_info.get("tags"),
-                annotations=registration_info.get("annotations"),
-                meta=registration_info.get("meta"),
-            )
+            # Check if we need to create a template or regular resource
+            uri = registration_info["uri"]
+            has_uri_params = "{" in uri and "}" in uri
 
-            mcp_server.add_resource(resource)
+            if has_uri_params:
+                resource = ResourceTemplate.from_function(
+                    fn=method,
+                    uri_template=registration_info["uri"],
+                    name=registration_info.get("name"),
+                    version=registration_info.get("version"),
+                    title=registration_info.get("title"),
+                    description=registration_info.get("description"),
+                    icons=registration_info.get("icons"),
+                    mime_type=registration_info.get("mime_type"),
+                    tags=registration_info.get("tags"),
+                    annotations=registration_info.get("annotations"),
+                    meta=registration_info.get("meta"),
+                    task=registration_info.get("task"),
+                    auth=registration_info.get("auth"),
+                )
+                mcp_server.add_template(resource)
+            else:
+                resource = Resource.from_function(
+                    fn=method,
+                    uri=registration_info["uri"],
+                    name=registration_info.get("name"),
+                    version=registration_info.get("version"),
+                    title=registration_info.get("title"),
+                    description=registration_info.get("description"),
+                    icons=registration_info.get("icons"),
+                    mime_type=registration_info.get("mime_type"),
+                    tags=registration_info.get("tags"),
+                    annotations=registration_info.get("annotations"),
+                    meta=registration_info.get("meta"),
+                    task=registration_info.get("task"),
+                )
+                mcp_server.add_resource(resource)
 
     def register_prompts(
         self,
@@ -250,10 +410,14 @@ class MCPMixin:
             prompt = Prompt.from_function(
                 fn=method,
                 name=registration_info.get("name"),
+                version=registration_info.get("version"),
                 title=registration_info.get("title"),
                 description=registration_info.get("description"),
+                icons=registration_info.get("icons"),
                 tags=registration_info.get("tags"),
                 meta=registration_info.get("meta"),
+                task=registration_info.get("task"),
+                auth=registration_info.get("auth"),
             )
             mcp_server.add_prompt(prompt)
 
