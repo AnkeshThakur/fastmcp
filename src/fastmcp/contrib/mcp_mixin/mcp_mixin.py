@@ -44,6 +44,7 @@ _PROMPT_VALID_KWARGS: frozenset[str] = frozenset(
 
 def mcp_tool(
     name: str | None = None,
+    *,
     enabled: bool | None = None,
     **kwargs: Any,
 ) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
@@ -138,6 +139,7 @@ def mcp_resource(
 
 def mcp_prompt(
     name: str | None = None,
+    *,
     enabled: bool | None = None,
     **kwargs: Any,
 ) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
